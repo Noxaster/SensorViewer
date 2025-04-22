@@ -1,5 +1,9 @@
 package com.example.sensorviewer
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -8,304 +12,325 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Looper
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import com.example.sensorviewer.ui.theme.SensorViewerTheme
-import androidx.core.app.ActivityCompat
-import android.Manifest
-import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.widget.Toast
-import androidx.compose.material3.TextField
-import androidx.compose.runtime.mutableStateOf
-import kotlinx.coroutines.delay
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import kotlin.math.abs
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat.checkSelfPermission
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.example.sensorviewer.ui.theme.SensorViewerTheme
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlin.math.roundToInt
 
-data class SensorData(
-    val accelX: Float = 0f,
-    val accelY: Float = 0f,
-    val accelZ: Float = 0f,
-    val gyroX: Float = 0f,
-    val gyroY: Float = 0f,
-    val gyroZ: Float = 0f
-)
+enum class Screen(val labels: List<String>) {
+    Accelerometer(listOf("X", "Y", "Z")),
+    Gyroscope(listOf("X", "Y", "Z")),
+    GPS(listOf("Latitude", "Longitude"))
+}
 
-data class GpsData(
-    val latitude: Double = 0.0,
-    val longitude: Double = 0.0
-)
+// Accelerometer
 
-private var latestSensorData = SensorData()
-private var latestGpsData = GpsData()
+fun Context.accelerometerFlow(): Flow<List<Float>> = callbackFlow {
+    val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    val accelSensor =
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: run { return@callbackFlow }
 
-class MainActivity : ComponentActivity(), SensorEventListener {
+    val listener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                trySend(event.values.toList())
+            }
+        }
 
-    private lateinit var sensorManager: SensorManager
-    private lateinit var locationManager: LocationManager
-    private var accelerometer: Sensor? = null
-    private var gyroscope: Sensor? = null
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
 
-    private val sensorData = mutableStateOf(SensorData())
-    private val gpsData = mutableStateOf(GpsData())
+    sensorManager.registerListener(listener, accelSensor, SensorManager.SENSOR_DELAY_NORMAL)
+    awaitClose { sensorManager.unregisterListener(listener) }
+}
 
-    private lateinit var thresholdAlertReceiver: ThresholdAlertReceiver
+// Gyroscope
 
-    var accelThresholdX by mutableStateOf(20f)
-    var accelThresholdY by mutableStateOf(20f)
-    var accelThresholdZ by mutableStateOf(20f)
+fun Context.gyroscopeFlow(): Flow<List<Float>> = callbackFlow {
+    val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    val gyroSensor =
+        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) ?: run { return@callbackFlow }
 
-    var gyroThresholdX by mutableStateOf(20f)
-    var gyroThresholdY by mutableStateOf(20f)
-    var gyroThresholdZ by mutableStateOf(20f)
+    val listener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (event.sensor.type == Sensor.TYPE_GYROSCOPE) {
+                trySend(event.values.toList())
+            }
+        }
 
-    private val locationListener = object : LocationListener {
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    sensorManager.registerListener(listener, gyroSensor, SensorManager.SENSOR_DELAY_NORMAL)
+    awaitClose { sensorManager.unregisterListener(listener) }
+}
+
+// GPS
+
+@SuppressLint("MissingPermission") // Check already before
+fun Context.gpsFlow(period: Long): Flow<List<Float>> = callbackFlow {
+    val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+    val listener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
-            latestGpsData = GpsData(location.latitude, location.longitude)
+            trySend(
+                listOf(
+                    location.latitude.toFloat(),
+                    location.longitude.toFloat(),
+                )
+            )
         }
     }
 
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    locationManager.requestLocationUpdates(
+        LocationManager.GPS_PROVIDER, period, 0f, listener,
+        Looper.getMainLooper()
+    )
+    awaitClose { locationManager.removeUpdates(listener) }
+}
+
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        thresholdAlertReceiver = ThresholdAlertReceiver()
-        val intentFilter = IntentFilter("com.example.THRESHOLD_TRIGGERED")
-        registerReceiver(thresholdAlertReceiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+        val rnp = registerForActivityResult(RequestPermission()) {}
 
-        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
-        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-
-        accelerometer?.also {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
-        }
-        gyroscope?.also {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
-        }
-
-        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED
+        if (checkSelfPermission(
+                this, Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
         ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
-                1
-            )
-        } else {
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                2000,
-                5f,
-                locationListener
-            )
+            rnp.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
-        val filter = IntentFilter("com.example.THRESHOLD_TRIGGERED")
-        registerReceiver(thresholdReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
 
         enableEdgeToEdge()
         setContent {
             SensorViewerTheme {
-                val periodState = remember { mutableFloatStateOf(1f) }
-                val context = LocalContext.current
-                LaunchedEffect(
-                    periodState.value, accelThresholdX, accelThresholdY, accelThresholdZ,
-                    gyroThresholdX, gyroThresholdY, gyroThresholdZ
-                ) {
-                    val intent = Intent(context, SensorService::class.java).apply {
-                        putExtra("period", periodState.value)
-                        putExtra("accelThresholdX", accelThresholdX)
-                        putExtra("accelThresholdY", accelThresholdY)
-                        putExtra("accelThresholdZ", accelThresholdZ)
-                        putExtra("gyroThresholdX", gyroThresholdX)
-                        putExtra("gyroThresholdY", gyroThresholdY)
-                        putExtra("gyroThresholdZ", gyroThresholdZ)
-                    }
-                    context.startService(intent)
-                }
+                val navController = rememberNavController()
+                val backStackEntry by navController.currentBackStackEntryAsState()
+                val currentScreen =
+                    Screen.valueOf(backStackEntry?.destination?.route ?: Screen.Accelerometer.name)
 
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Column(modifier = Modifier.padding(innerPadding)) {
-                        PeriodSlider(
-                            period = periodState.value,
-                            onPeriodChange = { periodState.value = it },
-                            modifier = Modifier.padding(innerPadding)
-                        )
-                        SensorDataCollector(
-                            period = periodState.value,
-                            modifier = Modifier.padding(innerPadding)
-                        )
-                        ThresholdInputs(
-                            onAccelThresholdChange = { x, y, z ->
-                                accelThresholdX = x
-                                accelThresholdY = y
-                                accelThresholdZ = z
-                            },
-                            onGyroThresholdChange = { x, y, z ->
-                                gyroThresholdX = x
-                                gyroThresholdY = y
-                                gyroThresholdZ = z
+                Scaffold(
+                    topBar = { TopBarDisplay(currentScreen, rnp) },
+                    bottomBar = { BottomBarDisplay(navController, currentScreen) },
+                    modifier = Modifier.fillMaxSize()
+                ) { innerPadding ->
+                    val ctx = LocalContext.current
+
+                    NavHost(
+                        navController = navController,
+                        startDestination = Screen.Accelerometer.name,
+                        modifier = Modifier
+                            .padding(innerPadding)
+                            .padding(horizontal = 16.dp)
+                            .fillMaxSize()
+                    ) {
+                        composable(route = Screen.Accelerometer.name) {
+                            val accelState by remember { ctx.accelerometerFlow() }.collectAsState(
+                                initial = listOf(0f, 0f, 0f)
+                            )
+
+                            SensorDisplay(
+                                currentScreen.labels,
+                                accelState.map { it.toString() }
+                            )
+                        }
+                        composable(route = Screen.Gyroscope.name) {
+                            val gyroState by remember { ctx.gyroscopeFlow() }.collectAsState(
+                                initial = listOf(0f, 0f, 0f)
+                            )
+
+                            SensorDisplay(
+                                currentScreen.labels,
+                                gyroState.map { it.toString() }
+                            )
+                        }
+                        composable(route = Screen.GPS.name) {
+                            if (checkSelfPermission(
+                                    ctx, Manifest.permission.ACCESS_FINE_LOCATION
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                val gpsState by remember { ctx.gpsFlow(1) }.collectAsState(
+                                    initial = listOf(0f, 0f, 0f)
+                                )
+
+                                SensorDisplay(
+                                    currentScreen.labels,
+                                    gpsState.map { it.toString() }
+                                )
+                            } else {
+                                Text("Needs precise location services.")
                             }
-                        )
+                        }
                     }
                 }
             }
         }
     }
+}
 
-    override fun onResume() {
-        super.onResume()
-        accelerometer?.also {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
-        }
-        gyroscope?.also {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
-        }
+// Top Bar
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TopBarDisplay(screen: Screen, rnp: ActivityResultLauncher<String>) {
+    val showDialog = remember { mutableStateOf(false) }
+
+    if (showDialog.value) {
+        DialogServiceCreate(screen, showDialog, rnp)
     }
 
-    override fun onPause() {
-        super.onPause()
-        sensorManager.unregisterListener(this)
-    }
-
-    override fun onSensorChanged(event: SensorEvent) {
-        checkThresholds(event.sensor.type, event.values)
-
-        when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> {
-                sensorData.value = sensorData.value.copy(
-                    accelX = event.values[0],
-                    accelY = event.values[1],
-                    accelZ = event.values[2]
-                )
-                latestSensorData = sensorData.value
-            }
-
-            Sensor.TYPE_GYROSCOPE -> {
-                sensorData.value = sensorData.value.copy(
-                    gyroX = event.values[0],
-                    gyroY = event.values[1],
-                    gyroZ = event.values[2]
-                )
-                latestSensorData = sensorData.value
+    TopAppBar(
+        title = { Text(text = screen.name) },
+        actions = {
+            OutlinedButton(onClick = {
+                showDialog.value = true
+            }) {
+                Text(text = "Service")
             }
         }
-    }
+    )
+}
 
-    private fun checkThresholds(sensorType: Int, values: FloatArray) {
-        if (sensorType == Sensor.TYPE_ACCELEROMETER) {
-            if (abs(values[0]) > accelThresholdX ||
-                abs(values[1]) > accelThresholdY ||
-                abs(values[2]) > accelThresholdZ
+@Composable
+fun DialogServiceCreate(
+    screen: Screen,
+    showDialog: MutableState<Boolean>,
+    rnp: ActivityResultLauncher<String>
+) {
+    Dialog(onDismissRequest = { showDialog.value = false }) {
+        val ctx = LocalContext.current
+        val inputData = remember { mutableStateListOf(*Array(screen.labels.size) { "10" }) }
+        var period by remember { mutableFloatStateOf(5f) }
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth()
             ) {
+                screen.labels.indices.forEach { idx ->
+                    TextField(
+                        value = inputData[idx],
+                        onValueChange = { inputData[idx] = it },
+                        label = { Text(screen.labels[idx]) })
+                }
 
-                sendThresholdBroadcast("AccelThreshold", values)
+                Spacer(Modifier.height(16.dp))
+                PeriodSliderDisplay(period) { period = it }
+                Spacer(Modifier.height(16.dp))
+
+                OutlinedButton(onClick = {
+                    val vals = inputData.map { it.toFloatOrNull() }
+                    if (vals.any { it == null }) {
+                        Toast.makeText(ctx, "Invalid input values!", Toast.LENGTH_SHORT).show()
+                        return@OutlinedButton
+                    }
+
+                    showDialog.value = false // Close dialog
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && checkSelfPermission(
+                            ctx, Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        rnp.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+
+                    ctx.startForegroundService(Intent(ctx, SensorService::class.java).apply {
+                        putExtra(SensorService.EXTRA_DATA, vals.filterNotNull().toFloatArray())
+                        putExtra(SensorService.EXTRA_PERIOD, period)
+                        putExtra(SensorService.EXTRA_SENSOR, screen.name)
+                    })
+
+                    Toast.makeText(ctx, "Service started", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text(text = "Set Threshold")
+                }
             }
-        } else if (sensorType == Sensor.TYPE_GYROSCOPE) {
-            if (abs(values[0]) > gyroThresholdX ||
-                abs(values[1]) > gyroThresholdY ||
-                abs(values[2]) > gyroThresholdZ
-            ) {
-
-                sendThresholdBroadcast("GyroThreshold", values)
-            }
         }
-    }
-
-    private fun sendThresholdBroadcast(type: String, values: FloatArray) {
-        val intent = Intent("com.example.THRESHOLD_TRIGGERED")
-        intent.setPackage(applicationContext.packageName)
-        intent.apply {
-            putExtra("type", type)
-            putExtra("x", values[0])
-            putExtra("y", values[1])
-            putExtra("z", values[2])
-        }
-        sendBroadcast(intent)
-        showThrottledToast(this, type, values[0], values[1], values[2])
-    }
-
-    private val thresholdReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val type = intent.getStringExtra("type")
-            val x = intent.getFloatExtra("x", 0f)
-            val y = intent.getFloatExtra("y", 0f)
-            val z = intent.getFloatExtra("z", 0f)
-
-            showThrottledToast(context, type, x, y, z)
-        }
-    }
-
-    private var lastToastTime = 0L
-    private val toastInterval = 2000L
-
-    fun showThrottledToast(context: Context, type: String?, x: Float, y: Float, z: Float) {
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastToastTime >= toastInterval) {
-            Toast.makeText(context, "$type Reach! X=$x, Y=$y, Z=$z", Toast.LENGTH_SHORT).show()
-            lastToastTime = currentTime
-        }
-    }
-
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-
-        sensorManager.unregisterListener(this)
-        locationManager.removeUpdates(locationListener)
-
-        try {
-            unregisterReceiver(thresholdAlertReceiver)
-        } catch (e: Exception) {
-        }
-
-        unregisterReceiver(thresholdReceiver)
     }
 }
 
 @Composable
-fun PeriodSlider(
-    period: Float,
-    onPeriodChange: (Float) -> Unit,
-    modifier: Modifier = Modifier
-) {
+fun PeriodSliderDisplay(sliderStart: Float, onPeriodChange: (Float) -> Unit = {}) {
+    var sliderPosition by remember { mutableFloatStateOf(sliderStart) }
+
     Column(
-        modifier = modifier.padding(20.dp),
+        modifier = Modifier.padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Slider(
-            value = period,
-            onValueChange = { newValue ->
-                val clamped = if (newValue == 0f) 1f else newValue
-                onPeriodChange(clamped)
+            value = sliderPosition.toFloat(),
+            onValueChange = {
+                sliderPosition = it
+                onPeriodChange(
+                    sliderPosition.roundToInt().toFloat()
+                ) // For correctness with the display
             },
             colors = SliderDefaults.colors(
                 thumbColor = MaterialTheme.colorScheme.secondary,
@@ -313,93 +338,64 @@ fun PeriodSlider(
                 inactiveTrackColor = MaterialTheme.colorScheme.secondaryContainer,
             ),
             steps = 8,
-            valueRange = 1f..10f
+            valueRange = sliderStart..15f
         )
-        Text(text = "Update Period: ${period.toInt()}s")
+        Text(text = "Update Period: ${sliderPosition.roundToInt()}s")
     }
 }
 
-@Composable
-fun SensorDataCollector(
-    period: Float,
-    modifier: Modifier = Modifier
-) {
-    val displaySensorData = remember { mutableStateOf(SensorData()) }
-    val displayGpsData = remember { mutableStateOf(GpsData()) }
+// Bottom Bar
 
-    LaunchedEffect(period) {
-        while (true) {
-            displaySensorData.value = latestSensorData
-            displayGpsData.value = latestGpsData
-            delay((period * 1000).toLong())
+@Composable
+fun BottomBarDisplay(nav: NavHostController, screen: Screen) {
+    NavigationBar {
+        Screen.entries.forEach {
+            NavigationBarItem(
+                icon = { Icon(Icons.Rounded.Info, contentDescription = it.name) },
+                label = { Text(text = it.name) },
+                selected = screen == it,
+                onClick = {
+                    nav.navigate(it.name) {
+                        popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                        launchSingleTop = true
+                        restoreState = true
+                    }
+                }
+            )
         }
     }
-
-    SliderAdvanced(
-        modifier = modifier,
-        sensorData = displaySensorData.value,
-        gpsData = displayGpsData.value,
-        period = period
-    )
 }
 
 @Composable
-fun SliderAdvanced(
-    modifier: Modifier = Modifier,
-    sensorData: SensorData,
-    gpsData: GpsData,
-    period: Float
+fun SensorDisplay(
+    labels: List<String>,
+    data: List<String>,
 ) {
-    Column(modifier = modifier.padding(16.dp)) {
-        Text("Accelerometer: X=${sensorData.accelX}, Y=${sensorData.accelY}, Z=${sensorData.accelZ}")
-        Text("Gyroscope: X=${sensorData.gyroX}, Y=${sensorData.gyroY}, Z=${sensorData.gyroZ}")
-        Text("GPS: Lat=${gpsData.latitude}, Lon=${gpsData.longitude}")
-        Text("Update Period: ${period}s")
-    }
-}
-
-@Composable
-fun ThresholdInputs(
-    onAccelThresholdChange: (Float, Float, Float) -> Unit,
-    onGyroThresholdChange: (Float, Float, Float) -> Unit
-) {
-    var ax by remember { mutableStateOf("20") }
-    var ay by remember { mutableStateOf("20") }
-    var az by remember { mutableStateOf("20") }
-
-    var gx by remember { mutableStateOf("20") }
-    var gy by remember { mutableStateOf("20") }
-    var gz by remember { mutableStateOf("20") }
-
-    Column(modifier = Modifier.padding(16.dp)) {
-        Text("Accelerometer Threshold")
-
-        TextField(value = ax, onValueChange = { ax = it }, label = { Text("X") })
-        TextField(value = ay, onValueChange = { ay = it }, label = { Text("Y") })
-        TextField(value = az, onValueChange = { az = it }, label = { Text("Z") })
-
-        androidx.compose.material3.Button(onClick = {
-            val fx = ax.toFloatOrNull() ?: 0f
-            val fy = ay.toFloatOrNull() ?: 0f
-            val fz = az.toFloatOrNull() ?: 0f
-            onAccelThresholdChange(fx, fy, fz)
-        }) {
-            Text("Set Threshold")
-        }
-
-        Text("Gyroscope Threshold")
-
-        TextField(value = gx, onValueChange = { gx = it }, label = { Text("X") })
-        TextField(value = gy, onValueChange = { gy = it }, label = { Text("Y") })
-        TextField(value = gz, onValueChange = { gz = it }, label = { Text("Z") })
-
-        androidx.compose.material3.Button(onClick = {
-            val fx = gx.toFloatOrNull() ?: 0f
-            val fy = gy.toFloatOrNull() ?: 0f
-            val fz = gz.toFloatOrNull() ?: 0f
-            onGyroThresholdChange(fx, fy, fz)
-        }) {
-            Text("Set Threshold")
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(labels.zip(data)) { (label, data) ->
+            OutlinedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = label,
+                        color = Color.Gray,
+                        fontSize = 12.sp,
+                        modifier = Modifier.align(Alignment.TopStart)
+                    )
+                    Text(
+                        text = data,
+                        fontSize = 24.sp,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+            }
         }
     }
 }
